@@ -1,15 +1,37 @@
+from langchain.chains import LLMChain
+from langchain.prompts import PromptTemplate
+from langchain.llms import OpenAI
+from web3 import Web3
+import os
 import time
 import random
 import threading
+from dotenv import load_dotenv
 from web3 import Web3
-import config  # Import the configuration file
+from langchain_openai import OpenAI  # Updated import
 
-# Connect to Ethereum network (e.g., Infura, Alchemy)
-w3 = Web3(Web3.HTTPProvider('https://sepolia.infura.io/v3/04bbf1252bbc4283a825a9694511153d'))
+# Load environment variables from .env file
+load_dotenv()
 
-# Define the USDT contract address and ABI
-USDT_CONTRACT_ADDRESS = Web3.to_checksum_address(config.USDT_CONTRACT_ADDRESS)  # USDT contract address
-USDT_ABI = [
+# Fetch environment variables
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+WEB3_URL = os.getenv("WEB3_URL")
+CRYPTO_CONTRACT_ADDRESS = os.getenv("CRYPTO_CONTRACT_ADDRESS")
+CHAIN_ID = os.getenv("CHAIN_ID")
+GAS = os.getenv("GAS")
+AGENT1_WALLET_ADDRESS = os.getenv("AGENT1_WALLET_ADDRESS")
+AGENT1_PRIVATE_KEY = os.getenv("AGENT1_PRIVATE_KEY")
+AGENT2_WALLET_ADDRESS = os.getenv("AGENT2_WALLET_ADDRESS")
+AGENT2_PRIVATE_KEY = os.getenv("AGENT2_PRIVATE_KEY")
+
+# Initialize Web3
+w3 = Web3(Web3.HTTPProvider(WEB3_URL))
+if not w3.is_connected():
+    print("Web3 is not connected. Check your INFURA_URL or node.")
+    exit(1)  # Exit the script if not connected
+
+# USDT Contract ABI
+usdt_abi = [
     {
         "constant": True,
         "inputs": [{"name": "", "type": "address"}],
@@ -33,149 +55,113 @@ USDT_ABI = [
     },
 ]
 
-# Create contract instance
-usdt_contract = w3.eth.contract(address=USDT_CONTRACT_ADDRESS, abi=USDT_ABI)
+# Load contract
+usdt_contract = w3.eth.contract(address=CRYPTO_CONTRACT_ADDRESS, abi=usdt_abi)
 
-# Define the words for random message generation
-WORDS = ["hello", "sun", "world", "space", "moon", "crypto", "sky", "ocean", "universe", "human"]
 
-class RealAgent:
+# Define the AI Agent
+class AIAgent:
 
     def __init__(self, name, wallet_address, private_key):
         self.name = name
+        self.wallet_address = wallet_address
+        self.private_key = private_key
         self.inbox = []
         self.outbox = []
-        self.wallet_address = wallet_address  # Wallet address for transactions
-        self.private_key = private_key  # Private key for signing transactions
-        self.message_handlers = {}  # Dictionary to hold message handlers
+        self.llm = OpenAI(temperature=0.7, openai_api_key=OPENAI_API_KEY)  # Initialize the AI model
 
-    def register_message_handler(self, message_type, handler):
-        """Register a message handler for a specific message type."""
-        self.message_handlers[message_type] = handler
+    def get_balance(self):
+        balance = usdt_contract.functions.balanceOf(self.wallet_address).call()
+        return w3.from_wei(balance, 'ether')
+
+    def send_crypto(self, recipient_address, amount):
+        # Check balance before sending
+        balance = self.get_balance()
+        amount_in_wei = w3.to_wei(amount, 'ether')
+        gas_price = w3.eth.gas_price
+        estimated_gas = 2000000  # You can adjust this based on your needs
+
+        total_cost = gas_price * estimated_gas + amount_in_wei
+        if balance < total_cost:
+            print(f"[{self.name}] Insufficient funds to send {amount} Ether. Current balance: {balance} Ether.")
+            return None  # Exit if insufficient funds
+
+        # Prepare and send a transaction
+        nonce = w3.eth.get_transaction_count(self.wallet_address)
+        tx = {
+            'nonce': nonce,
+            'to': recipient_address,
+            'value': amount_in_wei,
+            'gas': estimated_gas,
+            'gasPrice': gas_price
+        }
+        signed_tx = w3.eth.account.sign_transaction(tx, private_key=self.private_key)
+        tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        return w3.to_hex(tx_hash)
 
     def send_message(self, message, recipient):
-        """Send a message to the OutBox."""
         recipient.inbox.append(message)
         print(f"[{self.name}] Sent Message: {message}")
 
-    def send_crypto_message(self, recipient_address, amount=1.1E-10):  # Default amount set to 1.1E-10
-        """Send a crypto message to the specified recipient address with the specified amount."""
-        message = f"crypto {recipient_address} {amount}"  # Format the message
-        self.send_message(message, self)  # Send the message to self for processing
+    def handle_message(self, message, recipient_agent):
+        if "crypto" in message.lower():
+            amount_to_send = 1  # in Ether
+            tx_hash = self.send_crypto(recipient_agent.wallet_address, amount_to_send)
+            print(f"[{self.name}] Sent {amount_to_send} Ether to {recipient_agent.name}. Transaction Hash: {tx_hash}")
+        elif "hello" in message.lower():
+            print(f"[{self.name}] Received hello message: {message}")
+        else:
+            print(f"[{self.name}] No action taken for message: {message}")
 
-    def handle_message(self, message):
-        """Handle incoming messages based on their content."""
-        for message_type, handler in self.message_handlers.items():
-            if message_type in message:
-                handler(message)
-
-    def handle_crypto(self, message, sender_private_key):
-        """Handle crypto messages and perform token transfer."""
-        parts = message.split()
-        if len(parts) != 3:
-            print(f"[{self.name}] Invalid crypto message format: {message}")
-            return
-
-        recipient_address = parts[1]  # Extract recipient address
-        amount_to_send = float(parts[2])  # Extract amount to send
-
-        try:
-            # Fetch balance from the blockchain
-            balance = usdt_contract.functions.balanceOf(self.wallet_address).call()
-        except Exception as e:
-            print(f"[{self.name}] Error fetching balance: {e}")
-            return  # Exit early if there's an error fetching the balance
-
-        amount_to_send_wei = w3.to_wei(amount_to_send, 'ether')  # Convert USDT to Wei
-
-        if balance < amount_to_send_wei:
-            print(f"[{self.name}] Not enough USDT to transfer for: {message}")
-            return  # Exit early if balance is insufficient
-
-        # Log the current balance and recipient address
-        print(f"[{self.name}] Current Balance: {w3.from_wei(balance, 'ether')} USDT, Recipient: {recipient_address}")
-
-        # Prepare transaction
-        nonce = w3.eth.get_transaction_count(self.wallet_address)
-        gas_price = w3.eth.gas_price  # Get current gas price
-
-        transaction = usdt_contract.functions.transfer(recipient_address, amount_to_send_wei).build_transaction({
-            'chainId': 11155111,  # Sepolia Testnet
-            'gas': 2000000,
-            'gasPrice': gas_price,
-            'nonce': nonce,
-        })
-
-        # Sign the transaction with the sender's private key
-        signed_txn = w3.eth.account.sign_transaction(transaction, private_key=sender_private_key)
-
-        # Send the transaction
-        try:
-            tx_hash = w3.eth.send_raw_transaction(signed_txn.raw_transaction)
-            print(f"[{self.name}] Transaction successful - Tx Hash: {tx_hash.hex()}")
-            time.sleep(5)  # Wait for 5 seconds after the transaction
-        except Exception as e:
-            print(f"[{self.name}] Transaction failed for: {message} - Error: {e}")
+    def generate_ai_message(self):
+        prompt = """Generate a two-word random message with the help of this ["hello", "sun", "world", "space", "moon", "crypto", "sky", "ocean", "universe", 
+        "human"] words. you have to generate message from only given words don't use any other words ."""
+        response = self.llm(prompt)
+        return response.strip()  # Clean up the response
 
     def generate_random_message(self, recipient):
-        """Generate random 2-word messages every 2 seconds, with occasional crypto messages."""
+        """Generate messages every 2 seconds, with occasional crypto messages."""
         while True:
             if random.random() < 0.1:  # 10% chance to send a crypto message
                 recipient_address = recipient.wallet_address  # Use the recipient's wallet address
-                amount_to_send = 1.1E-10  # Example amount
-                self.send_crypto_message(recipient_address, amount_to_send)
+                amount_to_send = 0.01  # Example amount
+                self.send_message(f"crypto {recipient_address} {amount_to_send}", self)  # Send crypto message
             else:
-                message = f"{random.choice(WORDS)} {random.choice(WORDS)}"
+                message = self.generate_ai_message()  # Generate message using AI
                 self.send_message(message, recipient)
-            time.sleep(2)
-
-    def start(self, recipient):
-        """Start the agent's threads for message handling and generation."""
-        threading.Thread(target=self.receive_messages, daemon=True).start()
-        threading.Thread(target=self.generate_random_message, args=(recipient,), daemon=True).start()
+            time.sleep(2)  # Wait for 2 seconds before sending the next message
 
     def receive_messages(self):
         """Receive messages from the inbox and handle them."""
         while True:
             if self.inbox:
                 message = self.inbox.pop(0)  # Get the first message from the inbox
-                self.handle_message(message)  # Handle the received message
+                self.handle_message(message, self)  # Handle the received message
             time.sleep(1)  # Sleep for a short duration to avoid busy waiting
 
-    def print_available_tokens(self):
-        """Fetch and print available tokens for transaction."""
-        balance = usdt_contract.functions.balanceOf(self.wallet_address).call()
-        print(f"[{self.name}] Available Tokens:")
-        print(f"USDT Balance: {w3.from_wei(balance, 'ether')} USDT")
+    def start(self, recipient):
+        """Start the agent's threads for message handling and generation."""
+        threading.Thread(target=self.receive_messages, daemon=True).start()
+        threading.Thread(target=self.generate_random_message, args=(recipient,), daemon=True).start()
 
-# Create two real agents with wallet addresses and private keys from config
-agent1 = RealAgent("Agent1", config.AGENT1_WALLET_ADDRESS, config.AGENT1_PRIVATE_KEY)
-agent2 = RealAgent("Agent2", config.AGENT2_WALLET_ADDRESS, config.AGENT2_PRIVATE_KEY)
 
-# Print available tokens before starting the agents
-agent1.print_available_tokens()
-agent2.print_available_tokens()
+# Main execution
+def main():
+    # Initialize the agents
+    agent1 = AIAgent("Agent1", AGENT1_WALLET_ADDRESS, AGENT1_PRIVATE_KEY)
+    agent2 = AIAgent("Agent2", AGENT2_WALLET_ADDRESS, AGENT2_PRIVATE_KEY)
 
-# Ask user if they want to continue with the AI agents
-user_input = input("Do you want to continue with the AI agents? (yes/no): ").strip().lower()
-if user_input != 'yes':
-    print("Exiting the program.")
-    exit()
+    # Start the agents
+    agent1.start(agent2)  # Agent1 will send messages to Agent2
+    agent2.start(agent1)  # Agent2 will send messages to Agent1
 
-# Register message handlers
-agent1.register_message_handler("hello", lambda msg: print(f"[{agent1.name}] Hello Message Received: {msg}"))
-agent1.register_message_handler("crypto", lambda msg: agent1.handle_crypto(msg, agent1.private_key))
+    # Keep the main thread alive to allow the agents to run
+    try:
+        while True:
+            time.sleep(1)  # Sleep to keep the main thread alive
+    except KeyboardInterrupt:
+        print("Program interrupted. Shutting down gracefully...")
 
-agent2.register_message_handler("hello", lambda msg: print(f"[{agent2.name}] Hello Message Received: {msg}"))
-agent2.register_message_handler("crypto", lambda msg: agent2.handle_crypto(msg, agent2.private_key))
 
-# Start the agents
-agent1.start(agent2)  # Agent1 will send messages to Agent2
-agent2.start(agent1)  # Agent2 will send messages to Agent1
-
-# Keep the main thread alive to allow the agents to run
-try:
-    while True:
-        time.sleep(1)
-except KeyboardInterrupt:
-    print("Program interrupted. Shutting down gracefully...")
+if __name__ == "__main__":
+    main()

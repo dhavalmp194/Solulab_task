@@ -1,0 +1,42 @@
+# Python cache files
+__pycache__/
+*.pyc
+
+# Environment variables file
+.env
+
+# Virtual environment directory
+venv/
+*.egg-info/
+
+# IDE or editor specific files
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+
+# Byte-compiled / optimized files
+*.py[cod]
+*.pyo
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
